@@ -1,0 +1,16 @@
+# 文本文件统一在仓库内使用 LF 行尾,避免 Windows 下的 CRLF 造成无意义 diff
+* text=auto
+
+# 嵌入式工具链对行尾不敏感,但统一 LF 更利于跨平台协作
+*.c text eol=lf
+*.h text eol=lf
+*.s text eol=lf
+*.ld text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.ioc text eol=lf
+
+# 二进制文件不要做行尾转换
+*.png binary
+*.jpg binary
+*.pdf binary

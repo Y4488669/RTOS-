@@ -1,0 +1,49 @@
+# ===== 构建产物 =====
+# CMake/Ninja 构建目录(CLion 生成 cmake-build-*)
+cmake-build-*/
+build/
+out/
+
+# 编译输出
+*.o
+*.obj
+*.a
+*.lib
+*.d
+*.lst
+
+# 最终固件镜像 / 链接产物
+*.elf
+*.map
+*.bin
+*.hex
+*.axf
+*.srec
+
+# CMake 生成物
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.ninja
+.ninja_*
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# ===== 本地工具索引 =====
+# CodeGraph 代码索引(本地缓存,按需重新生成)
+.codegraph/
+
+# ===== STM32CubeMX =====
+# .ioc 是配置源头,.mxproject 是 CubeMX 生成的元数据,不入库
+.mxproject
+
+# ===== Python / 其他 =====
+__pycache__/
+*.pyc
