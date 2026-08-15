@@ -20,6 +20,9 @@ out/
 *.axf
 *.srec
 
+# PC 宿主测试程序(examples/ 里的 demo)
+*.exe
+
 # CMake 生成物
 CMakeCache.txt
 CMakeFiles/
