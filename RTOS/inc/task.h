@@ -14,14 +14,17 @@ typedef enum
     STOP ,
 }Task_Status;
 
-typedef struct Task_Struct
+struct Task
 {
-    char *name;
+    uint32_t *sp;
     Task_Status status;
-    uint32_t stack_size;
-}Task_Struct, *Task_Struct_Ptr;
+    list_node_t node;
+};
+
+typedef struct Task Task_t;
 
 
-void Task_Init(Task_Struct_Ptr task);
-
+void sched_init(void);
+void create_task(Task_t* task);
+void init_stack();
 #endif //RTOS_TASK_H

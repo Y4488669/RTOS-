@@ -19,9 +19,20 @@
 | 时基 | `RTOS/kernel.c` → `SysTick_Handler` | 每 1s 置 PendSV 挂起位,触发切换 |
 | 调度策略 | `RTOS/kernel.c` → `select_next_stask()` | 目前是 0↔1 双任务来回切换(轮转雏形) |
 | 临界区 | `RTOS/kernel.c` | 用 `BASEPRI` 屏蔽 ≤0xFF 的中断,保护调度临界区 |
-| 演示 | `Core/Src/main.c` | 两个任务轮流点亮/熄灭 LED(B/R 灯),1s 翻转一次 |
+| 演示 | `main.c` | 两个任务轮流拉高/拉低 PF11/PF12(寄存器直写 BSRR,无 HAL) |
 
 当前调度链路:`SysTick`(1s) → 置 `PENDSVSET` → `PendSV`(低优先级,不打断 ISR)→ 保存旧任务现场 → 选下一个任务 → 恢复新任务现场 → 返回。
+
+### ✅ 工程瘦身:CubeMX 工程 → 最小裸机(无 HAL)
+
+原工程由 STM32CubeMX 生成,HAL 库 + Core 目录共 6.7MB、上百个文件,而真正被用到的只有 GPIO 点灯。现已裁剪为最小裸机结构:
+
+- **删除**:`Drivers/`(HAL 全部 + CMSIS 多余头文件)、`Core/`(CubeMX 生成代码)、`cmake/`
+- **保留**:`CMSIS/` 仅 8 个必要头文件 + `system_stm32f4xx.c`、启动汇编、链接脚本
+- **重写**:`main.c` 改为寄存器直写(时钟用复位默认 HSI 16MHz,原 SystemClock_Config 本就是空操作);构建脚本全部内联进 `CMakeLists.txt`
+- 裁剪后全工程 ~15 个文件,固件 **FLASH 1.5KB / RAM 2.6KB**
+- `RTOS.ioc` 仅作留档,不再用于 CubeMX 重新生成
+- ⚠️ 注意:编译用 `-mfloat-abi=hard`,但内核上下文切换**尚未保存 FPU 寄存器**——任务里先别用 float,做 M5/M6 时再补 FPU 现场保存
 
 ### 🚧 骨架 / 待接入
 
@@ -30,25 +41,28 @@
 
 ---
 
-## 目录结构
+## 目录结构(裁剪后,~15 个文件)
 
 ```
 RTOS/
-├── CMakeLists.txt            # 顶层构建脚本(CMake + Ninja)
+├── CMakeLists.txt            # 唯一构建脚本:工具链+编译选项+链接,全部内联
 ├── CMakePresets.json         # Debug / Release 构建预设
-├── STM32F407xx_FLASH.ld      # 链接脚本(内存分区:FLASH/RAM/CCM)
+├── main.c                    # 裸机入口:寄存器直写 GPIO,创建任务并启动调度
 ├── startup_stm32f407xx.s     # 启动汇编:向量表 + 复位处理(.data拷贝/.bss清零)
-├── RTOS.ioc                  # STM32CubeMX 工程配置(配置源头)
+├── STM32F407xx_FLASH.ld      # 链接脚本(内存分区:FLASH/RAM/CCM)
+├── CMSIS/                    # 仅保留必要的 8 个头文件 + SystemInit
+│   ├── stm32f407xx.h         # F407 全部寄存器定义(核心)
+│   ├── stm32f4xx.h / system_stm32f4xx.h
+│   ├── core_cm4.h / cmsis_compiler.h / cmsis_gcc.h / cmsis_version.h / mpu_armv7.h
+│   └── system_stm32f4xx.c    # SystemInit(仅设 VTOR,不配时钟)
 ├── RTOS/                     # ★ 自研内核源码(重点学习区域)
 │   ├── kernel.h / kernel.c   # 调度器核心:栈初始化、SVC/PendSV/SysTick、临界区
 │   ├── inc/task.h            # 任务结构体与状态枚举(骨架)
 │   ├── src/task.c            # 任务管理(骨架)
 │   ├── inc/list.h            # 就绪队列链表(骨架)
 │   └── src/list.c            # 链表实现(尚未启用)
-├── Core/                     # STM32CubeMX 生成的启动/外设代码
-│   └── Src/main.c            # 应用入口,注册 2 个演示任务
-├── Drivers/                  # HAL 库 + CMSIS
-└── cmake/                    # 工具链定义、CubeMX 源码清单
+├── examples/                 # PC 上可跑的学习示例(不参与固件编译)
+└── RTOS.ioc                  # CubeMX 工程留档(已弃用,不再生成代码)
 ```
 
 ---
@@ -59,7 +73,7 @@ RTOS/
 
 | 工具 | 说明 |
 |---|---|
-| `arm-none-eabi-gcc` | 交叉编译工具链(本机位于 STM32CubeCLT 的 `GNU-tools-for-STM32`) |
+| `arm-none-eabi-gcc` | 交叉编译工具链(本机位于 STM32CubeCLT 的 `GNU-tools-for-STM32`,需在 PATH) |
 | CMake ≥ 3.22 + Ninja | 构建系统 |
 | CLion(可选) | IDE,CMake 原生支持 |
 | STM32CubeProgrammer / OpenOCD | 烧录调试 |
@@ -71,7 +85,7 @@ cmake --preset Debug          # 配置,产物目录 build/Debug
 cmake --build --preset Debug  # 编译
 ```
 
-产物:`build/Debug/RTOS.elf`(调试)与 `RTOS.bin`(烧录镜像)。
+产物:`build/Debug/RTOS.elf`(调试)与 `build/Debug/RTOS.bin`(烧录镜像,构建后自动生成并打印内存占用)。
 
 ### 烧录
 

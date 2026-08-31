@@ -1,33 +1,29 @@
-// //
-// // Created by lx on 2026/8/7.
-// //
-// #include "../inc/list.h"
-// #include "stddef.h"
-// static Node node;
 //
-// /**
-// * typedef struct
-// {
-//     uint8_t priority ;
-//     struct List *pxNext;
-//     struct List *pxPrevious;
-//     TCB_t pxTCB;
-// }List, *List_t;
-//  */
-// void List_Init()
-// {
-//     node.count = 0;
-//     node.list = NULL;
-// }
-// void List_add(List_t p_List)
-// {
-//     List_t plist;
-//     plist = node.list;
-//     node.count++;
-//     node.list = p_List;
-//     p_List->pxNext = plist;
-// }
-// void List_delete(List_t List)
-// {
+// Created by lx on 2026/8/7.
 //
-// }
+#include "../inc/list.h"
+#include "stddef.h"
+
+void list_init(list_node_t* head)
+{
+    head->prev = head;
+    head->next = head;
+}
+
+void list_add(list_node_t* list, list_node_t* new_node)
+{
+    if(list->next == list)
+    {
+        list->prev = new_node;
+    }
+    new_node->next = list->next;
+    new_node->prev = list;
+    list->next->prev = new_node;
+    list->next = new_node;
+}
+void list_del(list_node_t* old_node)
+{
+    list_node_t* tmp = old_node->prev;
+    tmp->next = old_node->next;
+    old_node->prev = tmp; 
+}

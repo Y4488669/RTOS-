@@ -6,34 +6,17 @@
 #define RTOS_LIST_H
 
 #include "stdint.h"
-#include "stm32f4xx_it.h"
 
-
-typedef struct
+struct list_node
 {
-    uint32_t *sp ;
-}TCB ,*TCB_t ;
+    struct list_node* next;
+    struct list_node* prev;
+};
+typedef struct list_node list_node_t;
 
 
+void list_init(list_node_t* head);
 
-
-
-typedef struct
-{
-    uint8_t priority ;
-    struct List *pxNext;
-    struct List *pxPrevious;
-    TCB_t pxTCB;
-}List, *List_t;
-
-typedef  struct
-{
-    uint8_t count;
-    List_t list;
-}Node,*p_Node;
-
-
-void List_Init();
-void List_add(List_t List);
-void List_delete(List_t List);
+void list_add(list_node_t* head, list_node_t* new_node);
+void list_del(list_node_t* old_node);
 #endif //RTOS_LIST_H

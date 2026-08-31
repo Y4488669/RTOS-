@@ -2,7 +2,6 @@
 // Created by lx on 2026/7/30.
 //
 #include "stdint.h"
-#include "stm32f4xx_it.h"
 #include "kernel.h"
 
 #define NVIC_SYSPRI3        (*((volatile uint32_t *)0xE000ED20))  /* 系统异常优先级寄存器 3 (PendSV + SysTick) */

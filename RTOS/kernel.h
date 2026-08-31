@@ -9,7 +9,6 @@
 // Created by lx on 2026/7/30.
 //
 #include "stdint.h"
-#include "stm32f4xx_it.h"
 #define STACK_SIZE (128)
 
 

@@ -2,24 +2,17 @@
     "version": 3,
     "configurePresets": [
         {
-            "name": "default",
-            "hidden": true,
+            "name": "Debug",
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build/${presetName}",
-		    "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
-            "cacheVariables": {
-            }
-        },
-        {
-            "name": "Debug",
-            "inherits": "default",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         },
         {
             "name": "Release",
-            "inherits": "default",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
