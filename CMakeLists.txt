@@ -51,7 +51,6 @@ add_executable(${CMAKE_PROJECT_NAME}
     main.c
     CMSIS/system_stm32f4xx.c
     startup_stm32f407xx.s
-    RTOS/kernel.c
     RTOS/src/list.c
     RTOS/src/task.c
 )
