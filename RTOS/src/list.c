@@ -25,5 +25,5 @@ void list_del(list_node_t* old_node)
 {
     list_node_t* tmp = old_node->prev;
     tmp->next = old_node->next;
-    old_node->prev = tmp; 
+    old_node->next->prev = tmp;
 }
