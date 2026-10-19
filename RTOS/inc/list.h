@@ -16,21 +16,57 @@
 #endif
 
 //这里必须这么char *强制类型转化，因为C 语言指针加减，是按「指针指向类型的大小」来偏移的。
-#define container_of(type,ptr,member) ({             \
+#define container_of(ptr,type,member) ({             \
     const typeof(((type*)0)->member) *_mptr = (ptr); \
     (type*) ((char *)_mptr -offsetof(type,member) );       })
 
+typedef struct list_node list_node_t;
+typedef struct list list_t;
 
 struct list_node
 {
-    struct list_node* next;
-    struct list_node* prev;
+    list_node_t* next;
+    list_node_t* prev;
+    list_t *container;
 };
-typedef struct list_node list_node_t;
+struct list
+{
+    list_node_t head;
+    uint32_t count;
+};
 
 
-void list_init(list_node_t* head);
+/* 链表操作
+ * 初始化链表
+ * 头插法
+ * 尾插法
+ * 删除节点，从链表上移除，（作用与节点没用的场景）
+ * 从链表上取出节点（该节点还有用）
+ * 判断链表为空
+ * 链表节点数量
+ *
+ */
+void list_init(list_t *l);
+void list_insert_head(list_t *l,list_node_t *n);
+void list_insert_tail(list_t *l,list_node_t *n);
+void list_remove(list_node_t *n);
+list_node_t *list_pop_head(list_t *l);
+int list_is_empty(const list_t *l);
+uint32_t list_count(const list_t *l);
 
-void list_add(list_node_t* head, list_node_t* new_node);
-void list_del(list_node_t* old_node);
+
+/* stage2新增 */
+
+void list_insert_before(list_node_t *pos, list_node_t *node);
+
+#define list_is_linked(n) ((n)->container != NULL)
+
+/* 取队首元素的宿主对象(空链表不要调)。*/
+#define list_first_entry(l, type, member) \
+    container_of((l)->head.next, type, member)
+
+
+#define list_for_each(pos, l) \
+     for ((pos) = (l)->head.next; (pos) != &(l)->head; (pos) = (pos)->next)
+
 #endif //RTOS_LIST_H

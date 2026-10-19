@@ -43,10 +43,32 @@ Makefile
 # CodeGraph 代码索引(本地缓存,按需重新生成)
 .codegraph/
 
+# ctags / cscope 代码索引(本地缓存,按需重新生成,见 ~/vim-guide/vim-使用手册.md)
+tags
+cscope.out
+cscope.in.out
+cscope.po.out
+cscope.files
+
 # ===== STM32CubeMX =====
 # .ioc 是配置源头,.mxproject 是 CubeMX 生成的元数据,不入库
 .mxproject
 
+# ===== 阅读用示例 =====
+# examples/ 是给自己读机制用的读物,不需要版本历史,随时可以重写、推翻、丢掉
+examples/
+
 # ===== Python / 其他 =====
 __pycache__/
 *.pyc
+
+# ===== 平台 / 构建 / 板级（本仓库只管理内核源码，这些留在本地） =====
+CMSIS/
+startup_stm32f407xx.s
+STM32F407xx_FLASH.ld
+CMakeLists.txt
+CMakePresets.json
+RTOS.ioc
+board/
+.settings/
+.clangd

@@ -1,172 +1,85 @@
-# RTOS —— 从零到一写一个 RTOS 内核(STM32F407)
+# 我的 RTOS 学习记录 —— 手写一个 Cortex-M4 内核
 
-> 一个学习项目:不依赖 FreeRTOS 等现成内核,**从零手写一个可运行的 RTOS 内核**,逐步掌握任务调度、上下文切换、同步互斥、IPC 等操作系统核心机制。
+> 这个项目是我用来学 RTOS 内核机制的。
+> 学习方法是：**先借助 AI 把 FreeRTOS 的核心机制精简成能读懂的最小版本，理解之后，再按阶段自己写一遍。**
+> 代码在 `RTOS/`，笔记和踩坑记录在 `docs/`。
 
-目标芯片:**STM32F407ZGTx**(Cortex-M4F,1MB Flash / 128K SRAM / 64K CCM RAM)。
+芯片 **STM32F407ZGTx**（Cortex-M4F）；内核约 2~3 千行；固件 **FLASH ~11 KB / RAM ~7 KB**。
 
----
+## 我是怎么学的
 
-## 当前进度(2026-08)
+1. **精简**：用 AI 把 FreeRTOS 的调度、链表、阻塞、信号量、队列、定时器抽出来，
+   去掉移植层、条件编译和工程外壳，只留机制 —— 留到"能在一个文件里看清它怎么转"的程度。
+2. **读懂**：每个机制都问到能自己画出数据结构、说清"谁在什么时候改哪条链"。
+3. **自己写**：按 stage1~4 动手写（不照抄），写完再对照精简版找差异。
+4. **记录**：崩过的、想通的，都写进 `docs/`。
 
-### ✅ 已实现:2 任务时间片轮转调度器(最小可用内核)
+> 为什么不直接读原版：对我来说，`#if` 分支、30+ 个移植层、heap_1~5 和工程约束混在一起，
+> 很容易把"工程约束"误当成"核心概念"。先精简到最小，再回头看原版，才知道它为什么加那些东西。
 
-| 模块 | 文件 | 说明 |
-|---|---|---|
-| TCB | `RTOS/kernel.h` | 任务控制块,当前仅含 `sp` 栈指针 |
-| 任务栈初始化 | `RTOS/kernel.c` → `init_statck()` | 伪造一个"已被中断过"的栈:硬件帧 8 字 + 软件帧 9 字 |
-| 首次启动 | `RTOS/kernel.c` → `SVC_Handler` | 用 SVC 异常进入,走"异常返回"路径启动第一个任务 |
-| 上下文切换 | `RTOS/kernel.c` → `PendSV_Handler` | 保存/恢复 R4~R11 + EXC_RETURN,`bx r14` 硬件弹栈 |
-| 时基 | `RTOS/kernel.c` → `SysTick_Handler` | 每 1s 置 PendSV 挂起位,触发切换 |
-| 调度策略 | `RTOS/kernel.c` → `select_next_stask()` | 目前是 0↔1 双任务来回切换(轮转雏形) |
-| 临界区 | `RTOS/kernel.c` | 用 `BASEPRI` 屏蔽 ≤0xFF 的中断,保护调度临界区 |
-| 演示 | `main.c` | 两个任务轮流拉高/拉低 PF11/PF12(寄存器直写 BSRR,无 HAL) |
+## 这个内核有什么
 
-当前调度链路:`SysTick`(1s) → 置 `PENDSVSET` → `PendSV`(低优先级,不打断 ISR)→ 保存旧任务现场 → 选下一个任务 → 恢复新任务现场 → 返回。
-
-### ✅ 工程瘦身:CubeMX 工程 → 最小裸机(无 HAL)
-
-原工程由 STM32CubeMX 生成,HAL 库 + Core 目录共 6.7MB、上百个文件,而真正被用到的只有 GPIO 点灯。现已裁剪为最小裸机结构:
-
-- **删除**:`Drivers/`(HAL 全部 + CMSIS 多余头文件)、`Core/`(CubeMX 生成代码)、`cmake/`
-- **保留**:`CMSIS/` 仅 8 个必要头文件 + `system_stm32f4xx.c`、启动汇编、链接脚本
-- **重写**:`main.c` 改为寄存器直写(时钟用复位默认 HSI 16MHz,原 SystemClock_Config 本就是空操作);构建脚本全部内联进 `CMakeLists.txt`
-- 裁剪后全工程 ~15 个文件,固件 **FLASH 1.5KB / RAM 2.6KB**
-- `RTOS.ioc` 仅作留档,不再用于 CubeMX 重新生成
-- ⚠️ 注意:编译用 `-mfloat-abi=hard`,但内核上下文切换**尚未保存 FPU 寄存器**——任务里先别用 float,做 M5/M6 时再补 FPU 现场保存
-
-### 🚧 骨架 / 待接入
-
-- `RTOS/inc/task.h` + `RTOS/src/task.c`:`Task_Struct`(名字/状态/栈大小)已定义,`Task_Init()` 尚为空,**任务状态机未接入调度器**。
-- `RTOS/inc/list.h` + `RTOS/src/list.c`:就绪队列的链表数据结构骨架(`List_add/Delete/Init`),目前整文件处于注释状态,**未接入内核**。这是下一步的关键。
-
----
-
-## 目录结构(裁剪后,~15 个文件)
-
-```
-RTOS/
-├── CMakeLists.txt            # 唯一构建脚本:工具链+编译选项+链接,全部内联
-├── CMakePresets.json         # Debug / Release 构建预设
-├── main.c                    # 裸机入口:寄存器直写 GPIO,创建任务并启动调度
-├── startup_stm32f407xx.s     # 启动汇编:向量表 + 复位处理(.data拷贝/.bss清零)
-├── STM32F407xx_FLASH.ld      # 链接脚本(内存分区:FLASH/RAM/CCM)
-├── CMSIS/                    # 仅保留必要的 8 个头文件 + SystemInit
-│   ├── stm32f407xx.h         # F407 全部寄存器定义(核心)
-│   ├── stm32f4xx.h / system_stm32f4xx.h
-│   ├── core_cm4.h / cmsis_compiler.h / cmsis_gcc.h / cmsis_version.h / mpu_armv7.h
-│   └── system_stm32f4xx.c    # SystemInit(仅设 VTOR,不配时钟)
-├── RTOS/                     # ★ 自研内核源码(重点学习区域)
-│   ├── kernel.h / kernel.c   # 调度器核心:栈初始化、SVC/PendSV/SysTick、临界区
-│   ├── inc/task.h            # 任务结构体与状态枚举(骨架)
-│   ├── src/task.c            # 任务管理(骨架)
-│   ├── inc/list.h            # 就绪队列链表(骨架)
-│   └── src/list.c            # 链表实现(尚未启用)
-├── examples/                 # PC 上可跑的学习示例(不参与固件编译)
-└── RTOS.ioc                  # CubeMX 工程留档(已弃用,不再生成代码)
-```
-
----
-
-## 环境与构建
-
-### 所需工具
-
-| 工具 | 说明 |
+| 部分 | 关键点 |
 |---|---|
-| `arm-none-eabi-gcc` | 交叉编译工具链(本机位于 STM32CubeCLT 的 `GNU-tools-for-STM32`,需在 PATH) |
-| CMake ≥ 3.22 + Ninja | 构建系统 |
-| CLion(可选) | IDE,CMake 原生支持 |
-| STM32CubeProgrammer / OpenOCD | 烧录调试 |
+| 调度 | 每优先级一条就绪链 + 位图 `CLZ` 选最高；同优先级轮转；PendSV 延迟切换（9 字软件帧含 EXC_RETURN） |
+| 任务 | 静态池 + 槽位图；5 个状态；延时 / 超时 / 无限等；删除的槽由空闲任务回收 |
+| 同步 / IPC | 计数信号量；互斥量（优先级继承）；队列（拷贝语义，醒来必重试）；邮箱 |
+| 其它 | 软件定时器（周期 / 单次，不漂移）、定长内存池（O(1)，零 malloc）、断言 / 栈水印 / HardFault 现场 |
+| 板级 | USART1（PA9/PA10，115200，MSH 那个口），demo 用串口打印 |
 
-### 命令行编译
+数据骨架是**五条链**：就绪 / 延时 / 待回收 / 对象等待 / 定时器。
+两条不变量：**RUNNING 不在任何链上**；一个任务的 `node` 只挂一条状态链、`wait_node` 至多一条事件链。
 
-```bash
-cmake --preset Debug          # 配置,产物目录 build/Debug
-cmake --build --preset Debug  # 编译
+## 怎么跑
+
+> 本仓库只管理内核源码与示例：编译所需的 `CMSIS/`、启动文件、链接脚本和 CMake 文件在本地，未入库。
+> 在本地把它们和 `RTOS/`、`main.c` 一起编译，烧录后串口（115200 8N1，平时看 msh 的那个口）会看到：
+
+```
+=== stage4:定时器 / 内存池 / 队列 / 槽回收 ===
+[  400ms] producer: 拿块 → 投递 #0
+[  700ms] consumer: 收到 #0(payload=0,队列 0)
+[ 1000ms] event   : 收到定时器回调给的信号量
+[ 3000ms] creator : 创建第 1 个短命任务
 ```
 
-产物:`build/Debug/RTOS.elf`(调试)与 `build/Debug/RTOS.bin`(烧录镜像,构建后自动生成并打印内存占用)。
+## 我踩过的坑
 
-### 烧录
-
-```bash
-STM32_Programmer_CLI -c port=SWD -w build/Debug/RTOS.bin 0x08000000 -RST
-```
-
-### 调试
-
-CLion 配置 arm-none-eabi-gdb + OpenOCD 即可单步;重点观察的现场:每个任务自己的 `sp`、进入 PendSV 前后 `psp`/`r4-r11` 的变化、`current_task` 的指向。
-
----
-
-## 内核设计笔记
-
-### 1. 上下文切换 = 换栈 + 换寄存器现场
-
-Cortex-M 上,**一次任务切换就是"把 A 的寄存器现场存进 A 的栈,再把 B 的栈里的现场弹回寄存器"**。切分两半:
-
-- **硬件自动保存(进异常时入栈,8 字)**:`xPSR / PC / LR / R12 / R3 / R2 / R1 / R0`
-- **软件手动保存(9 字)**:`R4~R11` + `R14`
-
-注意 `R14(LR)` 的奥妙:异常进入后硬件把 LR 装成 `EXC_RETURN`,所以 PendSV 保存的 R14 是 `EXC_RETURN` 而非任务自己的返回地址——任务的返回地址已经在硬件帧的 `PC` 里了。恢复时先软件弹回 R4~R11+R14,再用 `bx r14` 触发**硬件弹出**剩余 8 字,一条指令完成"软硬分界"。
-
-### 2. EXC_RETURN:异常怎么回去的
-
-`init_statck()` 里给 R14 填了 `0xFFFFFFFD`:
-
-| 值 | 含义 |
+| 坑 | 想明白之后 |
 |---|---|
-| `0xFFFFFFF1` | 返回**处理器模式**(Handler Mode),用 **MSP** |
-| `0xFFFFFFF9` | 返回**线程模式**,用 **MSP** |
-| `0xFFFFFFFD` | 返回**线程模式**,用 **PSP** ← 任务跑 PSP,因此伪造初始现场填这个 |
+| 链表插入顺序写反 | 先安顿自己，再改邻居；引用 `pos->prev` 的写入必须排在 `pos->prev = node` 之前 |
+| SHPR3 用 32 位指针写 | 字节寄存器 + 非对齐访问 → 优先级写歪 → 一个任务正常、两个任务在 `bx lr` 崩 |
+| 模块写好但没接线 | 每加一个入口都问"谁初始化、谁在什么时候调用" |
+| `deleted_list` 没初始化 / 没入队 | 删除只能"先记账、后回收"，由空闲任务动手 |
+| 定时器初始化太晚 | 初始化必须早于 main 里任何 `timer_start` |
 
-首次启动用 SVC 异常走"返回路径",是为了**复用同一套弹栈逻辑**:启动第一个任务看起来就像"从中断里回来",只是现场是 `init_statck` 预先伪造的。
+详细过程见各阶段笔记的"踩过的坑"小节；第一次调试的完整记录在 `docs/stage1调试日志.md`。
 
-### 3. 临界区:三种武器,别混用
+## 我故意没做 / 已知边界
 
-| 手段 | 屏蔽范围 | 用途 |
-|---|---|---|
-| `PRIMASK`(`cpsid i`) | **全部**可屏蔽中断 | 短临界区,代价高 |
-| `BASEPRI = x` | 优先级 ≤ x 的中断 | **任务调度临界区首选**(本工程用 `0xFF`) |
-| 关抢占(如仅关 SysTick) | 单个中断 | 精细控制 |
+- 切换**未保存 FPU 现场** → 任务里别用 `float`/`double`；
+- 抢占粒度 = 1 tick（`sched_need_switch()` 未实现）；
+- 优先级继承是简化版（不传递、多锁直接回 base）；删除任务不唤醒等待者；内存池不查重复 free；
+- 不做 SMP / MPU 隔离 / 动态堆 / 多架构移植。
 
-本工程在 `select_next_stask()` 前后用 `BASEPRI` 包裹,保证"选任务"这一段不被打断,又保留高优先级中断响应。
+这些不是"没来得及做"，是我为了把机制看清楚故意砍掉的。
 
-### 4. 为什么用 PendSV 而不是直接在 ISR 里切换
+## 文档
 
-SysTick 中断里**只置位** `PENDSVSET`,把真正的切换推迟到 PendSV。因为 PendSV 被配置为**最低优先级**(`0xFF`),它会在所有 ISR 完成之后才执行——避免"正在处理中断时切换任务导致现场错乱"的问题。这是 RTOS 标准的"延迟上下文切换"手法。
+- `docs/架构蓝图.md` —— 开工前定的分层、模块、不变量、接口契约
+- `docs/stage1.md` ~ `docs/stage4.md` —— 各阶段设计笔记 + 踩坑
+- `docs/stage1调试日志.md` —— 第一次调试的完整过程（含那次"一个任务不崩、两个任务崩"的排查）
 
----
+## 目录
 
-## 学习路线图(Roadmap)
+```
+RTOS/     内核：list / task / sched / tick / port / sync / queue / timer / mem / debug
+main.c    用法示例（stage4 演示）
+docs/     架构蓝图 + 四阶段笔记
+```
 
-从当前"2 任务轮转"到完整内核,建议的里程碑顺序:
-
-- [x] **M1 最小调度器**:任务栈构建、SVC 首启、PendSV 切换、SysTick 时基 ✅
-- [ ] **M2 就绪队列**:用 `list.h` 双向链表替换固定 2 槽 `task_table`,支持 N 个任务
-- [ ] **M3 任务状态机**:RUNNING / READY / BLOCKED / SUSPENDED,状态迁移入队出队
-- [ ] **M4 任务延时与阻塞**:`delay`/`sleep` 挂起任务,不再 `while` 死等
-- [ ] **M5 抢占式多优先级**:就绪队列按优先级排序,高优先级就绪即抢占
-- [ ] **M6 同步原语**:二值/计数信号量、互斥锁(优先级继承)
-- [ ] **M7 IPC**:消息队列、邮箱
-- [ ] **M8 软件定时器**
-- [ ] **M9 内存管理**:静态池 vs 堆分配器
-- [ ] **M10 健壮性**:HardFault 定位、断言、可追踪调试
-- [ ] **(可选)外设驱动**:串口、GPIO、定时器等,验证内核可用性
-
-> 建议:**每个里程碑一个可编译运行的 commit**,并写一小节设计笔记,失败或踩坑的地方单独记录。
+> 本地另有：`CMSIS/`、启动文件、链接脚本、CMake 文件和 `board/`（板级串口支持）—— 属于平台与板级，未入库。
 
 ---
 
-## 参考资料
-
-- 《Cortex-M3 权威指南》(Joseph Yiu)——上下文切换/异常模型的权威解释
-- FreeRTOS 源码——就绪链表、状态机、优先级继承的成熟参考
-- ARMv7-M Architecture Reference Manual
-- 本工程 `kernel.c` 中已实现代码本身就是最好的入门教材
-
----
-
-## License
-
-内核源码部分为个人学习代码;`Drivers/`、`Core/`(CubeMX 生成)与链接脚本版权归 ST 及原作者,详见各文件头。
+内核源码为个人学习代码；`CMSIS/`、启动文件与链接脚本版权归 ST 及原作者。

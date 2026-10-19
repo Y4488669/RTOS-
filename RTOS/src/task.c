@@ -2,206 +2,279 @@
 // Created by lx on 2026/7/30.
 //
 #include "../inc/task.h"
+#include "../inc/port.h"
+#include "../inc/sched.h"
+#include "tick.h"
+static task_t task_pool[CFG_MAX_TASKS];
 
-
-#define BASEPRI_MAX         (0xFF)    /* 屏蔽所有可屏蔽中断 */
-
-#define NVIC_SYSPRI3        (*((volatile uint32_t *)0xE000ED20))  /* 系统异常优先级寄存器 3 (PendSV + SysTick) */
-#define NVIC_SYSTICK_CTRL         (*((volatile uint32_t *)0xE000E010) ) /* SysTick 控制与状态 */
-#define NVIC_SYSTICK_LOAD         (*((volatile uint32_t *)0xE000E014))  /* SysTick 重装载值 */
-#define NVIC_SYSTICK_VAL          (*((volatile uint32_t *)0xE000E018))  /* SysTick 当前值 */
-
-
-/* SysTick Ctrl 寄存器位定义 */
-#define NVIC_SYSTICK_CTRL_ENABLE      (1 << 0)  /* SysTick 使能 */
-#define NVIC_SYSTICK_CTRL_TICKINT     (1 << 1)  /* SysTick 中断使能 */
-#define NVIC_SYSTICK_CTRL_CLKSOURCE   (1 << 2)  /* 时钟源选择: 1=处理器时钟, 0=外部参考时钟 */
-
-#define NVIC_INT_ICSR        (*((volatile uint32_t *)0xE000ED04))  /* 中断控制及状态寄存器ICSR */
-#define PENDSV_SET_BIT       (1<<28)
-#define PENDSV_STCLR_BIT     (1<<28)
-
-
-static struct list_node task_head;
-static Stack stacks[STACK_NUM];
-static uint32_t stack_usge = 0;
+static uint32_t slot_bitmap = 0;        /* bit i = 1 表示第 i 个槽正在用。
+                                         * (位图宽度是 32,所以 CFG_MAX_TASKS 别超 32)*/
 
 
 
-static Task_t* current_task = NULL;
+static list_t deleted_list;                                         
 
-static struct TCB *current_tcb = NULL ;
 
-//简易调度函数
-void find_task()
+
+
+void task_init(void)
 {
-    list_node_t *pos = current_task->node.next;    /* 下一个节点(裸节点指针) */
-    if (pos != &task_head)
-        current_task = container_of(Task_t,pos,node);
-    else
-        current_task = container_of(Task_t,pos->next,node);
-    current_tcb = current_task->sp;
+    list_init(&deleted_list);
+}
+
+static task_t *slot_alloc(void)
+{
+    KERNEL_ASSERT(slot_bitmap != ((1u << CFG_MAX_TASKS) - 1u));   /* 池子满了 */
+
+    uint32_t i = 0;
+    while (slot_bitmap & (1u << i))
+    {
+        i++;
+    }
+
+    slot_bitmap |= (1u << i);
+    return &task_pool[i];
+}
+
+void task_exit_hook(void)
+{
+    /* 任务函数"跑完了"(return)会落到这里 —— 这是"任务自然结束"的正规退出路径。
+     * 删掉自己之后,调度器就不会再理它(sched_switch 看到 DELETED 不会放回就绪队列)。*/
+    task_delete(task_self());
+
+    /* 兜底:正常情况下 PendSV 会在这一步之后立刻抢进来(task_delete 内部已经 sched_yield),
+     * 下面这个循环实际跑不到。*/
+    for (;;)
+    {
+    }
+}
+
+task_t *task_create(const char *name, void (*entry)(void), uint32_t prio)
+{
+    KERNEL_ASSERT(prio < CFG_PRIO_LEVELS);
+    KERNEL_ASSERT(entry != 0);
+    task_t *t = slot_alloc();
+    t->name = name;
+    t->entry = entry;
+    t->exit = task_exit_hook;
+    t->base_prio = prio;
+    t->cur_prio = prio;
+    t->state = TASK_READY;
+
+
+    /* 先把整块栈灌成填充模式。后面每次切换都会检查栈底那几个字有没有被改过,
+     * 改过了就说明栈溢出 —— 这是最便宜的栈溢出检测手段(见 debug.c)。*/
+    debug_stack_fill(t);
+
+    /* 再伪造初始栈帧(硬件知识,见 port.c 的栈布局图)。
+     * 顺序:先灌填充,再摆现场 —— 现场只占栈顶那一小段。*/
+    port_init_stack(t);
+
+    /* 入就绪队列,并判断要不要立刻抢占 —— 抢占的"全部代码量"就是下面这几行 */
+    port_enter_critical();
+    {
+        sched_ready(t);
+
+        /* 新任务若比正在跑的优先级高,现在就该切过去。
+         * 这里只是"挂号":PendSV 优先级最低,正被临界区的 BASEPRI 挡着,
+         * 等退出临界区、所有中断都处理完之后才真正执行。*/
+    }
+    port_exit_critical();
+
+    return t;
 }
 
 
-void tick_config()
-{
-    NVIC_SYSPRI3 = (0xFF << 24) | (0xFF << 16);
-    /* 配置 SysTick: 1s 切换一次。SYSCLK = HSI = 16MHz, CLKSOURCE=1 直接用 HCLK。
-     * LOAD = 16MHz/1Hz - 1 = 15999999 (24 位重装载, 上限 16777215, 放得下) */
-    NVIC_SYSTICK_LOAD = (16000000 / 1) - 1;
-    NVIC_SYSTICK_VAL  = 0;
-    NVIC_SYSTICK_CTRL = NVIC_SYSTICK_CTRL_ENABLE | NVIC_SYSTICK_CTRL_TICKINT | NVIC_SYSTICK_CTRL_CLKSOURCE;
-}
 
-void task_head_init()
+task_t *task_self(void)
 {
-    list_init(&task_head);
-}
-
-void sched_init(void)
-{
-
-    current_task = container_of(Task_t,task_head.next,node);
-    current_tcb = (current_task->sp);
-    //开启tick中断即可
-    tick_config();
-    __asm volatile ("svc 0");
+    return current_task;
 }
 
 
-/*
-* struct Task
+
+
+
+
+void task_delay(uint32_t ticks)
 {
-    uint32_t *sp;
-    void (*entry)(void);
-    void (*exit)(void);
-    Task_Status status;
-    list_node_t node;
-};
+    if (ticks == 0)
+    {
+        /* delay(0) 的语义:不睡,只让出一下。
+         * (FreeRTOS 的 vTaskDelay(0) 会真的等到**下一个 tick** 才回来;
+         *  这是两个内核的一个细微差别,写代码时要知道自己在用哪个语义。)*/
+        sched_yield();
+        return;
+    }
+
+    task_block_current(ticks);   /* 挂起自己(内部进临界区)*/
+    sched_yield();  
+}
+
+
+void task_block_current(uint32_t timeout_ticks)
+{
+    KERNEL_ASSERT(current_task != 0);   /* 调度器还没启动,谈不上"阻塞" */
+    port_enter_critical();
+    {
+        task_t *t = current_task;
+
+        t->state = TASK_BLOCKED;
+        /* "不等"(0)是调用方自己处理的分支,不该走到这里 */
+        KERNEL_ASSERT(timeout_ticks != 0);
+
+        if (timeout_ticks != TASK_WAIT_FOREVER)
+        {
+
+            t->wake_tick   = tick_get() + timeout_ticks;
+            t->wait_result = TASK_WAIT_TIMEOUT;   /* 预设:没等到东西就是超时 */
+            tick_delay_insert(t);
+        }
+        else
+        {
+            /* 无限等:只有"等到了"这一种结局 */
+            t->wait_result = TASK_WAIT_OK;
+        }
+
+    }
+    port_exit_critical();
+}
+
+void task_unblock(task_t *t)
+{
+    port_enter_critical();
+    {
+        list_remove(&t->node);
+        list_remove(&t->wait_node);
+
+        t->wait_result = TASK_WAIT_OK;   /* 是被叫醒的,不是超时 */
+        sched_ready(t);
+    }
+    port_exit_critical();
+}
+
+
+
+void task_suspend(task_t *t)
+{
+    int self = (t == task_self());
+
+    port_enter_critical();
+    {
+
+        sched_dequeue(t);
+        list_remove(&t->wait_node);
+        t->state = TASK_SUSPENDED;
+    }
+    port_exit_critical();
+
+    if (self)
+    {
+        /* 挂起的是自己:得让出去,否则接下来就没有语句可以执行了。
+         * 挂起的任务只能被**别人**恢复 —— 它自己已经没有 CPU 了。*/
+        sched_yield();
+    }
+}
+
+
+void task_resume(task_t *t)
+{
+    port_enter_critical();
+    {
+        if (t->state == TASK_SUSPENDED)
+        {
+            sched_ready(t);
+        }
+        /* 本版的简化:如果被挂起时它正在等信号量/睡延时,那个等待已经被
+         * task_suspend 丢掉了,恢复之后它只会"从就绪队列重新开始"。
+         * FreeRTOS 更细致:挂起不取消等待,恢复后接着等剩下的时间。
+         * 真要做对,就得在 SUSPENDED 时再记住"它原来在哪条链上" ——
+         * 又一个"状态多了就要多记账"的例子。*/
+    }
+    port_exit_critical();
+}
+
+
+void task_delete(task_t *t)
+{
+    int self = (t == task_self());
+
+    port_enter_critical();
+    {
+        list_remove(&t->node);
+        list_remove(&t->wait_node);
+        t->state = TASK_DELETED;
+
+        /* ★ 挂进"待回收"名单,而不是当场回收。
+         *   因为我们可能正在删**自己** —— 而自己此刻正踩着那块栈在跑,
+         *   把栈清掉等于把脚下的地板抽了。所以只能先记账,
+         *   等确定它不再运行之后,由空闲任务来回收(见 task_reclaim_deleted)。*/
+        list_insert_tail(&deleted_list, &t->node);
+    }
+    port_exit_critical();
+
+    if (self)
+    {
+        /* 删自己:让出去。
+         * sched_switch() 看到状态是 DELETED(而不是 RUNNING),就不会把它放回
+         * 就绪队列 —— 它的栈从此再也不会被恢复,这个任务就"消失"了。
+         * 换句话说,"任务自己结束"这件事**不需要任何新机制**:
+         * 只要状态机是干净的,调度器自然就不理它了。
+         *
+         * ⚠️ 但请注意:sched_yield() 只是"挂号",PendSV 要等到当前这几条
+         *    指令走完、且没有更高优先级中断在跑的时候才执行。所以
+         *    "删掉自己之后的几行代码"很可能还是会执行 —— 别在那里做事。*/
+        sched_yield();
+    }
+}
+
+
+
+
+
+/* ===========================================================================
+ * 回收:把已经"彻底不再运行"的已删除任务还回池子
+ * ===========================================================================
+ * 由空闲任务调用(见 sched.c 的 idle_task)。这是空闲任务存在的第三个理由
+ * (前两个是:兜底"没人可跑"、WFI 省电)。
+ *
+ * ★ 为什么删除要绕这一圈,不能当场回收?
+ *
+ *   因为"删掉自己"的任务**还在用自己那块栈** —— 它此刻正踩在上面执行代码。
+ *   当场把栈清掉 = 把脚下的地板抽了。所以只能:
+ *       ① 先把它挂进待回收名单(它马上就会被切换走);
+ *       ② 等它不再是 current_task,由空闲任务(用的是空闲任务自己的栈)回收。
+ *
+ *   这正是 FreeRTOS 里 vTaskDelete 最后一定要落到空闲任务上的原因 ——
+ *   它文档里只说了"删除的 TCB/栈由空闲任务释放",没说为什么。
+ *   现在你知道了。
  */
-void init_stack(Task_t* task)
+void task_reclaim_deleted(void)
 {
-    task->sp->sp = &(stacks[stack_usge++].stack[STACK_SIZE - 1]);  //指向了栈顶，栈由高地址->低地址生长；
-    uint32_t *sp = task->sp->sp;
-    /* 对齐偏移 (Cortex-M3 要求 8 字节栈对齐) */
-    sp--;
-    //硬件 8个寄存器xpsr pc lr r12 r3 r2 r1 r0
-    *sp-- = 0x01000000;     //使用tumb指令集 16位
-    *sp-- = (uint32_t)task->entry;   //任务入口地址
-    *sp-- = (uint32_t)task->exit;    //存的是返回地址，但是当前实际的lr里面存的是状态EXC_RETURN
-    //一下寄存器随意即可
-    *sp-- = 0xAAAAAAAA;
-    *sp-- = 0xBBBBBBBB;
-    *sp-- = 0xCCCCCCCC;
-    *sp-- = 0xDDDDDDDD;
-    *sp-- = 0xEEEEEEEE;
+    list_node_t *pos = deleted_list.head.next;
 
-    //软件，顺序其实随意即可，只要保持一致就行，有 r4-r11 ,需要存一个EXC_RETURN（代表状态，退出时是 psp ,线程模式，也就是存入lr（r14））
-    /*
-        |0xFFFF_FFF1|返回Handler模式|
-        |0xFFFF_FFF9|返回线程模式，使用MSP主堆栈|
-        |0xFFFF_FFFD|返回线程模式，使用PSP线程堆栈|
-     */
-    *sp-- = 0xFFFFFFFD;   //EXC_RETURN,r14
-    //以下随意即可 r4-r11
-    *sp-- = 0xAAAAAAAA;
-    *sp-- = 0xBBBBBBBB;
-    *sp-- = 0xCCCCCCCC;
-    *sp-- = 0xDDDDDDDD;
-    *sp-- = 0xEEEEEEEE;
-    *sp-- = 0xCCCCCCCC;
-    *sp-- = 0xDDDDDDDD;
-    *sp   = 0xEEEEEEEE;     /* R4 <- sp现在指向这里 */
-    task->sp->sp = sp;
+    while (pos != &deleted_list.head)
+    {
+        task_t *t = container_of(pos, task_t, node);
 
-}
-void create_task(Task_t* task)
-{
-    task->status = RUNNING;
-    list_add(&task_head, &(task->node));
-    init_stack(task);
-}
+        /* 先存好下一个:下面一旦 list_remove(pos),pos->next 就被清成 NULL 了。
+         * (list.h 里那句提醒在这里用上了。)*/
+        list_node_t *next = pos->next;
 
+        /* 判断"它是不是真的不跑了":
+         *   state == DELETED            —— 确定被删了;
+         *   t != current_task           —— 而且此刻不是它在 CPU 上。
+         * 两条一起构成"这个任务已经不在任何栈上执行"的充分条件
+         * (不变量:正在跑的任务**就是** current_task)。*/
+        if (t->state == TASK_DELETED && t != current_task)
+        {
+            list_remove(&t->node);                     /* 从待回收名单上摘掉 */
 
-void SysTick_Handler(void)
-{
-    NVIC_INT_ICSR |= PENDSV_SET_BIT;
-}
-/*  SVC服务程序
- * 1.找到当前的任务栈空间 sp;
- * 2.出栈软件入栈的寄存器
- * 3.更新psp指针
- * 4,开中断
- * 5.退出
- */
+            uint32_t idx = (uint32_t)(t - task_pool);
+            slot_bitmap &= ~(1u << idx);              /* 槽还回池子 */
+            t->name = 0;                              /* 别在调试器里留个"幽灵任务" */
+        }
 
-
-__attribute__((naked)) void SVC_Handler( void )
-{
-    __asm volatile (
-        "ldr r0,  =current_tcb \n"   // r0 = &current_tcb，相当于将地址赋予了r0，不是将current_tcb地址处的内容服务
-        "ldr r1, [r0]          \n"   // r1 = current_tcb, =====是一个指向TCB的指针
-        "ldr r3, [r1]          \n"   // r3 = *current_tcb = tcb->sp
-        "ldmia r3!, {r4-r11, r14}\n"
-        "msr psp, r3           \n"
-        "isb                     \n"      /* 让新的 PSP 在异常返回前立即生效 */
-        "mov r0, #0            \n"
-        "msr basepri, r0       \n"    //开中断,且特殊功能寄存器必须用msr指令访问,不过，如果没有关中断的话，这里其实可以不写也没啥事
-        "bx r14                \n"
-        ".ltorg                  \n"     /* naked 函数不自动生成字面量池，需手动放置  */
-    );
-}
-/* PendSV_Handler 函数
- *  保存现场，不能直接保存，因为线程模式用的是psp指针，但是到中断里面用的是msp，所以需要动一下
- *  切换,执行切换函数
- *  恢复现场
- */
-
-__attribute__((naked)) void PendSV_Handler(void)     //优先级最低，不会抢占其他中断
-{
-    __asm volatile (
-        "mrs r0, psp       \n"
-
-
-        "isb                       \n"   /* 清空流水线 */
-
-
-        "stmdb r0!, {r4-r11, r14} \n"     //因为下面需要进入一个函数里面，退出后会有lr变成函数的返回值，不是EXC_RETURN了，所以需要切换才行
-
-        //更新当前任务的栈指针，因为刚刚入栈了一些上下文，所以需要更新栈指针
-        "ldr r1, =current_tcb    \n"
-        "ldr r3, [r1]            \n"
-        "str r0, [r3]            \n"
-
-
-        //进行任务切换
-        "mov r4, lr              \n"                //因为进入find_task函数会覆盖掉原来的EXC_RETURN
-
-        "mov r0, %0                \n"
-        "msr basepri, r0           \n"     /* 关中断: 屏蔽所有低于 configMAX 的中断 */
-        "bl find_task            \n"
-        "mov r0, #0                \n"
-        "msr basepri, r0           \n"     /* 开中断 */
-        "mov lr, r4              \n"
-
-        //恢复现场
-        "ldr r3, =current_tcb    \n"
-        "ldr r1, [r3]            \n"
-        "ldr r0, [r1]            \n"
-        "ldmia r0!, {r4-r11, r14}\n"
-        "msr psp, r0              \n"
-
-        "isb                       \n"
-
-
-        "bx r14                   \n"
-
-
-        ".ltorg                    \n"    /* naked 函数不自动生成字面量池，需手动放置 */
-
-        :
-        :"i"(BASEPRI_MAX)                             /* %0 = 中断屏蔽优先级(给%0赋值) */
-
-     );
+        pos = next;
+    }
 }
